@@ -1,75 +1,90 @@
 import streamlit as st
 import pandas as pd
-
-st.title('Investment Analysis Platform - University of Birmingham')
-st.write('Chào An, đây là dashboard phân tích danh mục đầu tư của bạn.')
-
-import streamlit as st
-import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
 import plotly.graph_objects as go
 
-# Cấu hình giao diện chuyên nghiệp cho Portfolio tại Birmingham
-st.set_page_config(page_title="OptiPortfolio Expert - Andy", layout="wide")
+# Professional Page Config
+st.set_page_config(page_title="OptiPortfolio Expert | Andy Do", layout="wide")
 st.title("📈 OptiPortfolio Expert")
-st.markdown("### Advanced Portfolio Optimization Platform (MPT)")
-st.write("Dự án của Đỗ Thành An - MSc Investment Student ID: 2926461")
+st.markdown("### Strategic Asset Allocation & Mean-Variance Optimization")
+st.write("Developed by: **Andy Do** (MSc Investment, University of Birmingham)")
 
-# --- SIDEBAR: CÀI ĐẶT THAM SỐ (Settings) ---
-st.sidebar.header("⚙️ Settings")
-freq = st.sidebar.selectbox("Tần suất dữ liệu (Frequency)", ['Daily', 'Weekly', 'Monthly', 'Yearly'])
-rf_rate = st.sidebar.number_input("Lãi suất phi rủi ro (Risk-free Rate)", value=0.04)
+# --- SIDEBAR: PARAMETERS ---
+st.sidebar.header("⚙️ Optimization Settings")
+freq = st.sidebar.selectbox("Data Frequency", ['Daily', 'Weekly', 'Monthly', 'Yearly'])
+rf_rate = st.sidebar.number_input("Annual Risk-Free Rate (decimal)", value=0.04, step=0.001)
 
-# Tính hệ số nhân dựa trên tần suất (giống đoạn code React của bạn)
-freq_map = {'Daily': 252, 'Weekly': 52, 'Monthly': 12, 'Yearly': 1}
-multiplier = freq_map[freq]
+st.sidebar.subheader("Weight Constraints")
+min_w = st.sidebar.slider("Minimum Weight per Asset (%)", 0, 100, 0) / 100
+max_w = st.sidebar.slider("Maximum Weight per Asset (%)", 0, 100, 100) / 100
 
-# --- PHẦN LỰA CHỌN SỐ STOCK & CONSTRAINT ---
-st.sidebar.subheader("Asset Constraints")
-num_stocks = st.sidebar.slider("Số lượng Stock trong danh mục", 2, 30, 10)
-min_w = st.sidebar.slider("Weight tối thiểu mỗi mã (%)", 0, 50, 0) / 100
-max_w = st.sidebar.slider("Weight tối đa mỗi mã (%)", 0, 100, 40) / 100
+# --- DATA UPLOAD ---
+st.header("1. Data Input")
+uploaded_file = st.file_uploader("Upload Historical Returns/Prices (CSV or XLSX)", type=["xlsx", "csv"])
 
-# --- XỬ LÝ DỮ LIỆU (Mô phỏng 30 cổ phiếu cho CFA Level II) ---
-st.info("💡 Bạn có thể upload file Excel 30 cổ phiếu của mình tại đây trong tương lai.")
+if uploaded_file is not None:
+    # Load Data
+    df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+    st.success("Data loaded successfully!")
+    
+    # Process numeric columns only
+    returns = df.select_dtypes(include=[np.number])
+    tickers = returns.columns.tolist()
+    n_assets = len(tickers)
 
-# Tạo dữ liệu ngẫu nhiên để demo thuật toán
-tickers = [f"Stock {i+1}" for i in range(num_stocks)]
-returns_data = np.random.normal(0.01, 0.05, (100, num_stocks))
-df_returns = pd.DataFrame(returns_data, columns=tickers)
+    # Annualization Multiplier
+    freq_map = {'Daily': 252, 'Weekly': 52, 'Monthly': 12, 'Yearly': 1}
+    adj = freq_map[freq]
+    
+    # Calculate Annualized Stats
+    ann_rets = returns.mean() * adj
+    ann_cov = returns.cov() * adj
 
-# Tính toán Mean và Covariance
-avg_rets = df_returns.mean() * multiplier
-cov_mat = df_returns.cov() * multiplier
+    # --- OPTIMIZATION LOGIC ---
+    def get_portfolio_metrics(weights):
+        p_ret = np.sum(ann_rets * weights)
+        p_vol = np.sqrt(np.dot(weights.T, np.dot(ann_cov, weights)))
+        return p_ret, p_vol
 
-# --- THUẬT TOÁN TỐI ƯU (Optimization Engine) ---
-def get_stats(w):
-    p_ret = np.sum(avg_rets * w)
-    p_vol = np.sqrt(np.dot(w.T, np.dot(cov_mat, w)))
-    return p_ret, p_vol
+    def negative_sharpe(weights):
+        p_ret, p_vol = get_portfolio_metrics(weights)
+        return -(p_ret - rf_rate) / p_vol
 
-# Ràng buộc: Tổng tỷ trọng = 100%
-cons = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-bounds = tuple((min_w, max_w) for _ in range(num_stocks))
+    # Constraints: Sum of weights = 1
+    cons = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+    bounds = tuple((min_w, max_w) for _ in range(n_assets))
+    init_guess = n_assets * [1. / n_assets]
 
-# Tìm danh mục có Sharpe Ratio cao nhất (Tangency Portfolio)
-def min_func_sharpe(w):
-    p_ret, p_vol = get_stats(w)
-    return -(p_ret - rf_rate) / p_vol
+    # Solver
+    res = minimize(negative_sharpe, init_guess, method='SLSQP', bounds=bounds, constraints=cons)
+    
+    if res.success:
+        opt_weights = res.x
+        opt_ret, opt_vol = get_portfolio_metrics(opt_weights)
+        sharpe = (opt_ret - rf_rate) / opt_vol
 
-res = minimize(min_func_sharpe, num_stocks * [1./num_stocks], bounds=bounds, constraints=cons)
-opt_w = res.x
+        # --- DISPLAY RESULTS ---
+        st.header("2. Optimization Output (Annualized)")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Expected Return", f"{opt_ret:.2%}")
+        m2.metric("Portfolio Volatility", f"{opt_vol:.2%}")
+        m3.metric("Sharpe Ratio", f"{sharpe:.4f}")
 
-# --- HIỂN THỊ KẾT QUẢ (Dashboard) ---
-col1, col2, col3 = st.columns(3)
-p_ret, p_vol = get_stats(opt_w)
-col1.metric("Expected Return", f"{p_ret:.2%}")
-col2.metric("Volatility (Risk)", f"{p_vol:.2%}")
-col3.metric("Sharpe Ratio", f"{(p_ret - rf_rate) / p_vol:.4f}")
+        # Bar Chart for Weights
+        st.subheader("Optimal Portfolio Composition")
+        w_series = pd.Series(opt_weights, index=tickers).sort_values(ascending=False)
+        st.bar_chart(w_series)
 
-# Vẽ biểu đồ Weights
-st.subheader("Optimal Asset Allocation")
-st.bar_chart(pd.Series(opt_w, index=tickers))
-
-st.success("Platform đã chạy thành công dựa trên logic từ AI Studio!")
+        # Asset Detail Table
+        st.subheader("Asset Breakdown")
+        detail_df = pd.DataFrame({
+            "Asset": tickers,
+            "Annualized Return": ann_rets.values,
+            "Optimal Weight": opt_weights
+        }).sort_values(by="Optimal Weight", ascending=False)
+        st.table(detail_df.style.format({"Annualized Return": "{:.2%}", "Optimal Weight": "{:.2%}"}))
+    else:
+        st.error("Optimization failed. Please check your constraints or data quality.")
+else:
+    st.info("Awaiting historical data file to begin analysis.")
