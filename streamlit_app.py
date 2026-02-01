@@ -3,65 +3,108 @@ import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
 
-# Professional Setup for Andy Do - MSc Investment Birmingham
+# Professional Setup
 st.set_page_config(page_title="OptiPortfolio Pro | Andy Do", layout="wide")
 st.title("📈 OptiPortfolio Pro: Multi-Period Optimizer")
-st.write("Student: **Andy Do** | ID: 2926461 | University of Birmingham")
+st.write("Developed by: **Andy Do**") 
 
-# --- STEP 1: INITIAL SETTINGS ---
-st.sidebar.header("1. Global Settings")
-# Frequency selection before data processing
-freq_choice = st.sidebar.selectbox(
-    "Select Data Frequency", 
-    ['Daily', 'Weekly', 'Monthly'], 
-    index=1  # Default to Weekly
-)
+# --- 1. GLOBAL SETTINGS ---
+st.sidebar.header("Global Settings")
+freq_choice = st.sidebar.selectbox("Data Frequency", ['Daily', 'Weekly', 'Monthly'], index=1)
 freq_map = {'Daily': 252, 'Weekly': 52, 'Monthly': 12}
 multiplier = freq_map[freq_choice]
 
-rf_annual = st.sidebar.number_input("Annual Risk-Free Rate (e.g. 0.04)", value=0.04, step=0.001)
-# Convert RF to periodic for solver consistency
+# Risk-free rate input as %
+rf_annual_pct = st.sidebar.number_input("Annual Risk-Free Rate (%)", value=4.0, step=0.1)
+rf_annual = rf_annual_pct / 100
 rf_periodic = rf_annual / multiplier
 
-# --- STEP 2: DATA INPUT ---
-st.header("2. Data Input")
-uploaded_file = st.file_uploader("Upload your Prices file (Excel/CSV)", type=["xlsx", "csv"])
+# --- 2. DATA INPUT ---
+uploaded_file = st.file_uploader("Upload Prices file (Excel/CSV)", type=["xlsx", "csv"])
 
 if uploaded_file:
-    # Load data based on file type
-    if uploaded_file.name.endswith('.xlsx'):
-        df = pd.read_excel(uploaded_file)
-    else:
-        df = pd.read_csv(uploaded_file)
-    
-    # Extract numeric columns (Prices)
+    df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith('.xlsx') else pd.read_csv(uploaded_file)
     prices = df.select_dtypes(include=[np.number])
     
-    # CALCULATION: Arithmetic Periodic Returns
-    # Using (P_t / P_t-1) - 1
+    # CALCULATE ARITHMETIC PERIODIC RETURNS
     returns = prices.pct_change().dropna()
     
-    st.subheader(f"Asset Selection & Individual Constraints ({freq_choice})")
+    st.subheader(f"Asset Selection & Weight Constraints (% Scale)")
     all_tickers = returns.columns.tolist()
-    selected = st.multiselect("Select Tickers for Portfolio", all_tickers, default=all_tickers[:5] if len(all_tickers) > 5 else all_tickers)
+    selected = st.multiselect("Select Tickers", all_tickers, default=all_tickers[:5] if len(all_tickers) > 5 else all_tickers)
 
     if len(selected) >= 2:
-        # STEP 3: INDIVIDUAL WEIGHT CONSTRAINTS
-        st.write("Set specific Min/Max weight boundaries for each asset:")
+        st.info("Input weights as percentages (e.g., enter 10 for 10%). Total Min % must be <= 100%.")
+        
+        # --- 3. INDIVIDUAL WEIGHT CONSTRAINTS (IN %) ---
         ind_cons = {}
-        # Create columns dynamically for inputs
         c_cols = st.columns(min(len(selected), 5)) 
         for i, t in enumerate(selected):
             with c_cols[i % 5]:
                 st.markdown(f"**{t}**")
-                min_v = st.number_input(f"Min %", 0.0, 1.0, 0.0, key=f"min_{t}", step=0.01)
-                max_v = st.number_input(f"Max %", 0.0, 1.0, 1.0, key=f"max_{t}", step=0.01)
-                ind_cons[t] = (min_v, max_v)
+                min_v_pct = st.number_input(f"Min Weight %", 0.0, 100.0, 0.0, key=f"min_{t}")
+                max_v_pct = st.number_input(f"Max Weight %", 0.0, 100.0, 100.0, key=f"max_{t}")
+                ind_cons[t] = (min_v_pct / 100, max_v_pct / 100)
 
-        # Pre-check logic for constraints
-        if sum([v[0] for v in ind_cons.values()]) > 1:
-            st.error("❌ Total Minimum Weights exceed 100%. Optimization is impossible.")
-        else:
-            # STEP 4: PERIODIC STATS (Arithmetic)
-            mu_periodic = returns[selected].mean()
-            cov_periodic = returns[selected].cov
+        # --- 4. EXECUTION ---
+        if st.button("🚀 Run Portfolio Optimization"):
+            total_min_pct = sum([v[0] for v in ind_cons.values()])
+            
+            if total_min_pct > 1.0:
+                st.error(f"Impossible Constraints: Total Min Weight is {total_min_pct*100:.1f}%. Must be <= 100%.")
+            else:
+                mu_periodic = returns[selected].mean()
+                cov_periodic = returns[selected].cov()
+
+                def get_port_stats(w):
+                    p_ret = np.sum(mu_periodic * w)
+                    p_vol = np.sqrt(np.dot(w.T, np.dot(cov_periodic, w)))
+                    return p_ret, p_vol
+
+                def objective(w):
+                    r, v = get_port_stats(w)
+                    return -(r - rf_periodic) / v if v > 0 else 0
+
+                constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1.0})
+                bounds = [ind_cons[t] for t in selected]
+                init_w = np.array([1.0/len(selected)] * len(selected))
+
+                with st.spinner('Calculating...'):
+                    res = minimize(objective, init_w, method='SLSQP', bounds=bounds, constraints=constraints)
+
+                if res.success:
+                    opt_w = res.x
+                    p_ret_per, p_vol_per = get_port_stats(opt_w)
+                    
+                    st.divider()
+                    st.header("3. Optimization Results")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown(f"#### Periodic Stats ({freq_choice})")
+                        st.metric("Exp. Return", f"{p_ret_per:.4%}")
+                        st.metric("Risk (Std Dev)", f"{p_vol_per:.4%}")
+                    
+                    with col2:
+                        st.markdown("#### Annualized Stats")
+                        st.metric("Annual Return", f"{(p_ret_per * multiplier):.2%}")
+                        st.metric("Annual Volatility", f"{(p_vol_per * np.sqrt(multiplier)):.2%}")
+
+                    ann_sharpe = (p_ret_per * multiplier - rf_annual) / (p_vol_per * np.sqrt(multiplier))
+                    st.subheader(f"Portfolio Sharpe Ratio: {ann_sharpe:.4f}")
+
+                    st.subheader("Optimal Allocation Detail")
+                    res_df = pd.DataFrame({
+                        'Ticker': selected,
+                        'Periodic Return': [f"{mu_periodic[t]:.4%}" for t in selected],
+                        'Annual Return': [f"{(mu_periodic[t]*multiplier):.2%}" for t in selected],
+                        'Optimal Weight (%)': [f"{w*100:.2f}%" for w in opt_w]
+                    }).set_index('Ticker')
+                    
+                    st.table(res_df)
+                    st.bar_chart(pd.Series(opt_w * 100, index=selected))
+                    st.success(f"Total Portfolio Weight: {np.sum(opt_w)*100:.2f}%")
+                else:
+                    st.error("Solver failed. Check if constraints are mathematically possible.")
+else:
+    st.info("Awaiting historical prices to begin optimization.")
