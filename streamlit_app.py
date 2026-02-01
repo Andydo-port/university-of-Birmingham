@@ -28,63 +28,85 @@ if uploaded_file is not None:
     df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
     st.success("Data loaded successfully!")
     
-    # Process numeric columns only
-    returns = df.select_dtypes(include=[np.number])
-    tickers = returns.columns.tolist()
-    n_assets = len(tickers)
-
-    # Annualization Multiplier
-    freq_map = {'Daily': 252, 'Weekly': 52, 'Monthly': 12, 'Yearly': 1}
-    adj = freq_map[freq]
+    # Identify numeric columns (potential tickers)
+    all_numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     
-    # Calculate Annualized Stats
-    ann_rets = returns.mean() * adj
-    ann_cov = returns.cov() * adj
+    # --- NEW: ASSET SELECTION ---
+    st.subheader("Asset Selection")
+    selected_tickers = st.multiselect(
+        "Select tickers to include in optimization:", 
+        options=all_numeric_cols, 
+        default=all_numeric_cols[:10] if len(all_numeric_cols) > 10 else all_numeric_cols
+    )
 
-    # --- OPTIMIZATION LOGIC ---
-    def get_portfolio_metrics(weights):
-        p_ret = np.sum(ann_rets * weights)
-        p_vol = np.sqrt(np.dot(weights.T, np.dot(ann_cov, weights)))
-        return p_ret, p_vol
-
-    def negative_sharpe(weights):
-        p_ret, p_vol = get_portfolio_metrics(weights)
-        return -(p_ret - rf_rate) / p_vol
-
-    # Constraints: Sum of weights = 1
-    cons = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-    bounds = tuple((min_w, max_w) for _ in range(n_assets))
-    init_guess = n_assets * [1. / n_assets]
-
-    # Solver
-    res = minimize(negative_sharpe, init_guess, method='SLSQP', bounds=bounds, constraints=cons)
-    
-    if res.success:
-        opt_weights = res.x
-        opt_ret, opt_vol = get_portfolio_metrics(opt_weights)
-        sharpe = (opt_ret - rf_rate) / opt_vol
-
-        # --- DISPLAY RESULTS ---
-        st.header("2. Optimization Output (Annualized)")
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Expected Return", f"{opt_ret:.2%}")
-        m2.metric("Portfolio Volatility", f"{opt_vol:.2%}")
-        m3.metric("Sharpe Ratio", f"{sharpe:.4f}")
-
-        # Bar Chart for Weights
-        st.subheader("Optimal Portfolio Composition")
-        w_series = pd.Series(opt_weights, index=tickers).sort_values(ascending=False)
-        st.bar_chart(w_series)
-
-        # Asset Detail Table
-        st.subheader("Asset Breakdown")
-        detail_df = pd.DataFrame({
-            "Asset": tickers,
-            "Annualized Return": ann_rets.values,
-            "Optimal Weight": opt_weights
-        }).sort_values(by="Optimal Weight", ascending=False)
-        st.table(detail_df.style.format({"Annualized Return": "{:.2%}", "Optimal Weight": "{:.2%}"}))
+    if len(selected_tickers) < 2:
+        st.warning("Please select at least 2 assets to perform optimization.")
     else:
-        st.error("Optimization failed. Please check your constraints or data quality.")
+        returns = df[selected_tickers]
+        n_assets = len(selected_tickers)
+
+        # Annualization Multiplier
+        freq_map = {'Daily': 252, 'Weekly': 52, 'Monthly': 12, 'Yearly': 1}
+        adj = freq_map[freq]
+        
+        # Calculate Annualized Stats (Careful with Return calculations)
+        ann_rets = returns.mean() * adj
+        ann_cov = returns.cov() * adj
+
+        # --- OPTIMIZATION LOGIC ---
+        def get_portfolio_metrics(weights):
+            p_ret = np.sum(ann_rets * weights)
+            p_vol = np.sqrt(np.dot(weights.T, np.dot(ann_cov, weights)))
+            return p_ret, p_vol
+
+        def negative_sharpe(weights):
+            p_ret, p_vol = get_portfolio_metrics(weights)
+            # Avoid division by zero
+            if p_vol == 0: return 0
+            return -(p_ret - rf_rate) / p_vol
+
+        # Constraints: Sum of weights = 1
+        cons = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+        bounds = tuple((min_w, max_w) for _ in range(n_assets))
+        init_guess = n_assets * [1. / n_assets]
+
+        # Solver
+        res = minimize(negative_sharpe, init_guess, method='SLSQP', bounds=bounds, constraints=cons)
+        
+        if res.success:
+            opt_weights = res.x
+            opt_ret, opt_vol = get_portfolio_metrics(opt_weights)
+            sharpe = (opt_ret - rf_rate) / opt_vol
+
+            # --- DISPLAY RESULTS ---
+            st.header("2. Optimization Output (Annualized)")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Expected Return", f"{opt_ret:.2%}")
+            m2.metric("Portfolio Volatility (Risk)", f"{opt_vol:.2%}")
+            m3.metric("Sharpe Ratio", f"{sharpe:.4f}")
+
+            # Bar Chart for Weights
+            st.subheader("Optimal Portfolio Composition")
+            w_series = pd.Series(opt_weights, index=selected_tickers).sort_values(ascending=False)
+            # Filter out near-zero weights for clarity
+            w_series = w_series[w_series > 0.0001]
+            st.bar_chart(w_series)
+
+            # Asset Detail Table
+            st.subheader("Asset Breakdown")
+            detail_df = pd.DataFrame({
+                "Asset": selected_tickers,
+                "Ann. Return": ann_rets.values,
+                "Ann. Volatility": (returns.std() * np.sqrt(adj)).values,
+                "Optimal Weight": opt_weights
+            }).sort_values(by="Optimal Weight", ascending=False)
+            
+            st.table(detail_df.style.format({
+                "Ann. Return": "{:.2%}", 
+                "Ann. Volatility": "{:.2%}",
+                "Optimal Weight": "{:.2%}"
+            }))
+        else:
+            st.error("Optimization failed. The constraints might be too restrictive.")
 else:
     st.info("Awaiting historical data file to begin analysis.")
